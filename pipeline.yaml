@@ -358,6 +358,11 @@ Resources:
       LambdaArn: !GetAtt StartGlueWorkflowFunction.Arn
       FilterPrefix: "raw/ratings/"
       FilterSuffix: ".csv"
+      # Bump this any time BucketNotificationConfigFunction's code logic
+      # changes. CloudFormation only re-invokes a custom resource when ITS
+      # OWN properties change -- changing the code of the Lambda it calls
+      # does NOT force a re-invocation on its own.
+      ConfigVersion: "2"
 
   # ---------------------------------------------------------------------
   # CloudWatch / EventBridge alarms (optional, only if email provided)

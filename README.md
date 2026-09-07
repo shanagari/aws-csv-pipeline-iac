@@ -29,28 +29,40 @@ CloudFormation stack.
 - `pipeline.yaml` — the CloudFormation template
 - `scripts/transform.py` — the Glue Python Shell ETL script (uploaded to
   the scripts bucket by `deploy.sh`, not embedded in the template)
-- `deploy.sh` — deploys the stack, then uploads the ETL script
+- `sample-data/movies/movies.csv`, `sample-data/ratings/ratings.csv` — test
+  data, one subfolder per dataset, mirroring the `raw/<dataset>/` layout in S3
+- `deploy.sh` — deploys the infra stack, then uploads the ETL script
+- `upload-data.sh` — uploads sample data to the already-deployed stack
+  (separate from infra deploy — run this any time to (re-)trigger the
+  pipeline)
 - `destroy.sh` — empties the buckets, then deletes the stack
 
 ## Deploy
 
 ```bash
-chmod +x deploy.sh destroy.sh
+chmod +x deploy.sh destroy.sh upload-data.sh
 ./deploy.sh you@example.com   # email is optional; omit to skip alerts
+./upload-data.sh              # loads sample data and triggers the pipeline
 ```
 
-This will:
-1. Create/update the CloudFormation stack (`csv-pipeline-stack`).
-2. Upload `scripts/transform.py` to the scripts bucket.
-3. Print the input bucket name and the exact S3 paths to upload your CSVs to.
+`deploy.sh` only provisions infrastructure — buckets, IAM roles, Lambda,
+Glue database/crawler/job/workflow. It does not touch data. `upload-data.sh`
+is the separate step that loads `sample-data/movies/movies.csv` and
+`sample-data/ratings/ratings.csv` into the input bucket, which is what actually
+fires the pipeline.
 
-After that, upload your two data files:
-```bash
-aws s3 cp movies.csv  s3://<input-bucket>/raw/movies/movies.csv
-aws s3 cp ratings.csv s3://<input-bucket>/raw/ratings/ratings.csv
-```
-Either upload triggers Lambda → Glue Workflow (crawler → ETL job)
-automatically. Check `s3://<output-bucket>/transformed/` for the result.
+**Note on the trigger**: the S3 event notification only fires on uploads to
+`raw/ratings/*.csv`, not on any `.csv` under `raw/`. This is deliberate —
+the ETL job reads both `movies.csv` and `ratings.csv`, so triggering on the
+`movies.csv` upload alone would start the workflow before `ratings.csv`
+exists, and the job would fail. Both `upload-data.sh` and the GitHub Action
+upload `movies.csv` first, then `ratings.csv`, so by the time the trigger
+fires, both files are already in place. If you add more datasets to this
+pipeline, either upload them before the "triggering" file, or add a proper
+manifest-file pattern instead of relying on upload order.
+
+Check `s3://<output-bucket>/transformed/` for the result after the workflow
+run completes (takes a couple of minutes: crawler, then ETL job).
 
 If you provided a notification email, confirm the SNS subscription email
 that AWS sends you, or you won't receive failure alerts.
@@ -119,7 +131,7 @@ Actions automatically provides its own token for checking out your
 repo. The credentials above are purely for authenticating *to AWS*,
 which is the actual missing piece.
 
-### 4. Deploy
+### 4. Deploy the infrastructure
 
 - **Automatic**: push a change to `pipeline.yaml` or
   `scripts/transform.py` on `main` — `.github/workflows/deploy.yml`
@@ -130,7 +142,26 @@ which is the actual missing piece.
 Check the **Actions** tab for logs — the final step prints the stack
 outputs (bucket names, workflow name) same as running `deploy.sh` locally.
 
-### 5. Destroy
+### 5. Upload sample data (separate workflow)
+
+This is deliberately its own workflow, decoupled from infra deploy — so
+you can load/reload data without re-running CloudFormation, and infra
+changes don't accidentally re-trigger a data upload.
+
+- **Automatic**: push a change to any CSV under `sample-data/<dataset>/` —
+  `.github/workflows/upload-data.yml` runs automatically, and uploads
+  **only the files that changed** in that push (diffed against the commit
+  before the push, so multi-commit pushes are handled correctly, not just
+  the single most recent commit).
+- **Manual**: **Actions tab → Upload Sample Data → Run workflow** — this
+  uploads everything under `sample-data/`, not just a diff.
+
+Each file's destination is derived from its path: `sample-data/movies/movies.csv`
+uploads to `raw/movies/movies.csv` in the input bucket, `sample-data/ratings/ratings.csv`
+to `raw/ratings/ratings.csv`, and so on for any dataset folder you add — see
+the trigger note above for why the S3 event only fires on `ratings/*.csv`.
+
+### 6. Destroy
 
 Go to **Actions tab → Destroy CSV Pipeline → Run workflow**, and type
 `destroy` into the confirmation input. This is a manual-only, confirmation-gated

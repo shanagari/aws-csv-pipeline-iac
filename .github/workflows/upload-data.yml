@@ -1,12 +1,17 @@
 name: Upload Sample Data
 
+# Triggers whenever a CSV under sample-data/ is added or changed on main,
+# or can be run manually. Only the files that actually changed get
+# re-uploaded - not the whole folder every time.
 on:
   push:
     branches: [main]
     paths:
-      - "sample-data/**"
-      - ".github/workflows/upload-data.yml"
+      - "sample-data/**/*.csv"
   workflow_dispatch: {}
+
+permissions:
+  contents: read   # only needs to check out the repo
 
 jobs:
   upload:
@@ -14,6 +19,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history, so the before/after diff below always works
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -35,15 +42,40 @@ jobs:
           fi
           echo "input_bucket=${INPUT_BUCKET}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload sample data
+      - name: Find changed CSV files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual run: upload everything under sample-data/, not just a diff.
+            FILES=$(find sample-data -type f -name "*.csv")
+          else
+            # Push: diff against the commit *before* this push (github.event.before),
+            # not just HEAD^. This correctly catches every CSV changed across ALL
+            # commits in the push, not only the most recent one (a multi-commit
+            # push, e.g. from a rebase or batched commits, would otherwise silently
+            # miss earlier files).
+            FILES=$(git diff --name-only --diff-filter=ACM \
+              "${{ github.event.before }}" "${{ github.sha }}" -- 'sample-data/**/*.csv')
+          fi
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload each changed CSV to its matching raw/ path
         run: |
           # The S3 event notification (see pipeline.yaml) only fires on
           # uploads to raw/ratings/*.csv, not any .csv under raw/. That's
           # deliberate: the ETL job reads both movies.csv and ratings.csv, so
           # triggering on movies.csv alone would start the workflow before
-          # ratings.csv exists, and the job would fail. Upload movies.csv
-          # first so both files already exist by the time ratings.csv's
-          # upload fires the trigger.
-          aws s3 cp sample-data/movies.csv  "s3://${{ steps.lookup.outputs.input_bucket }}/raw/movies/movies.csv"
-          aws s3 cp sample-data/ratings.csv "s3://${{ steps.lookup.outputs.input_bucket }}/raw/ratings/ratings.csv"
-          echo "Uploaded. The ratings.csv upload above triggers the Glue Workflow automatically."
+          # ratings.csv exists, and the job would fail. If you push both
+          # files in the same commit, ratings.csv still uploads last below
+          # (alphabetical), so both already exist by the time it fires.
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              # sample-data/movies/movies.csv -> raw/movies/movies.csv
+              dest_key="raw/${file#sample-data/}"
+              echo "Uploading $file -> s3://${{ steps.lookup.outputs.input_bucket }}/${dest_key}"
+              aws s3 cp "$file" "s3://${{ steps.lookup.outputs.input_bucket }}/${dest_key}"
+            fi
+          done <<< "$(echo '${{ steps.changed.outputs.files }}' | sort)"
+          echo "Done. Any ratings/*.csv upload above triggers the Glue Workflow automatically."

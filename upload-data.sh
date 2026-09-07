@@ -19,7 +19,7 @@ fi
 # pipeline.yaml) so that the workflow only starts once both movies.csv and
 # ratings.csv already exist in S3. Upload movies.csv first.
 echo "Uploading to s3://${INPUT_BUCKET} ..."
-aws s3 cp sample-data/movies.csv  "s3://${INPUT_BUCKET}/raw/movies/movies.csv"
-aws s3 cp sample-data/ratings.csv "s3://${INPUT_BUCKET}/raw/ratings/ratings.csv"
+aws s3 cp sample-data/movies/movies.csv    "s3://${INPUT_BUCKET}/raw/movies/movies.csv"
+aws s3 cp sample-data/ratings/ratings.csv  "s3://${INPUT_BUCKET}/raw/ratings/ratings.csv"
 
 echo "Uploaded. The ratings.csv upload above triggers the Glue Workflow automatically."

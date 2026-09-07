@@ -299,7 +299,7 @@ Resources:
                                       "Filter": {
                                           "Key": {
                                               "FilterRules": [
-                                                  {"Name": "prefix", "Value": "raw/"},
+                                                  {"Name": "prefix", "Value": "raw/ratings/"},
                                                   {"Name": "suffix", "Value": ".csv"},
                                               ]
                                           }

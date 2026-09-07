@@ -1,0 +1,49 @@
+name: Upload Sample Data
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sample-data/**"
+      - ".github/workflows/upload-data.yml"
+  workflow_dispatch: {}
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Look up input bucket from the deployed stack
+        id: lookup
+        run: |
+          INPUT_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name csv-pipeline-stack \
+            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
+            --output text)
+          if [ -z "${INPUT_BUCKET}" ] || [ "${INPUT_BUCKET}" == "None" ]; then
+            echo "Stack 'csv-pipeline-stack' not found or has no InputBucketName output. Deploy the infrastructure first."
+            exit 1
+          fi
+          echo "input_bucket=${INPUT_BUCKET}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sample data
+        run: |
+          # The S3 event notification (see pipeline.yaml) only fires on
+          # uploads to raw/ratings/*.csv, not any .csv under raw/. That's
+          # deliberate: the ETL job reads both movies.csv and ratings.csv, so
+          # triggering on movies.csv alone would start the workflow before
+          # ratings.csv exists, and the job would fail. Upload movies.csv
+          # first so both files already exist by the time ratings.csv's
+          # upload fires the trigger.
+          aws s3 cp sample-data/movies.csv  "s3://${{ steps.lookup.outputs.input_bucket }}/raw/movies/movies.csv"
+          aws s3 cp sample-data/ratings.csv "s3://${{ steps.lookup.outputs.input_bucket }}/raw/ratings/ratings.csv"
+          echo "Uploaded. The ratings.csv upload above triggers the Glue Workflow automatically."

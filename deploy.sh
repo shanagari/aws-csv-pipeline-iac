@@ -24,6 +24,8 @@ echo "Stack deployed. Fetching output bucket names..."
 
 INPUT_BUCKET=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
   --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" --output text)
+OUTPUT_BUCKET=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
+  --query "Stacks[0].Outputs[?OutputKey=='OutputBucketName'].OutputValue" --output text)
 SCRIPTS_BUCKET=$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
   --query "Stacks[0].Outputs[?OutputKey=='ScriptsBucketName'].OutputValue" --output text)
 
@@ -32,6 +34,4 @@ aws s3 cp scripts/transform.py "s3://${SCRIPTS_BUCKET}/scripts/transform.py"
 
 echo ""
 echo "Done. Input bucket: ${INPUT_BUCKET}"
-echo "Upload movies.csv to   s3://${INPUT_BUCKET}/raw/movies/movies.csv"
-echo "Upload ratings.csv to  s3://${INPUT_BUCKET}/raw/ratings/ratings.csv"
-echo "Uploading either file triggers the pipeline automatically."
+echo "Run ./upload-data.sh to load the sample data and trigger the pipeline."

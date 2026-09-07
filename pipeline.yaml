@@ -1,0 +1,433 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CSV ingestion pipeline: S3 (input) -> Lambda -> Glue Workflow
+  (Crawler -> Python Shell ETL Job) -> S3 (output), with CloudWatch/EventBridge
+  failure alarms via SNS.
+
+Parameters:
+  InputBucketName:
+    Type: String
+    Default: aws-bootcamp-input-v2
+    Description: Bucket where source CSVs are uploaded (under raw/<dataset>/).
+  OutputBucketName:
+    Type: String
+    Default: aws-bootcamp-output-v2
+    Description: Bucket where transformed output is written.
+  ScriptsBucketName:
+    Type: String
+    Default: aws-bootcamp-scripts-v2
+    Description: Bucket holding the Glue Python Shell job script.
+  GlueDatabaseName:
+    Type: String
+    Default: aws_bootcamp_db_v2
+    Description: Glue Data Catalog database name.
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address to receive pipeline failure alerts. Leave blank to skip.
+
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # S3 Buckets
+  # ---------------------------------------------------------------------
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref InputBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref OutputBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ScriptsBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------------------------------------------------------------------
+  # IAM Roles
+  # ---------------------------------------------------------------------
+  LambdaGlueTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaGlueTriggerRole-CFN
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaGlueTriggerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartWorkflowRun
+                  - glue:GetWorkflowRun
+                Resource: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/csv-ingestion-workflow-v2"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${InputBucketName}/raw/*"
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueETLRole-CFN
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3AccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${InputBucketName}"
+                  - !Sub "arn:aws:s3:::${InputBucketName}/*"
+                  - !Sub "arn:aws:s3:::${OutputBucketName}"
+                  - !Sub "arn:aws:s3:::${OutputBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ScriptsBucketName}"
+                  - !Sub "arn:aws:s3:::${ScriptsBucketName}/*"
+
+  # ---------------------------------------------------------------------
+  # Glue Data Catalog + Crawler + Job
+  # ---------------------------------------------------------------------
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: bootcamp-crawler-data-v2
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${InputBucketName}/raw/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      # No Schedule property = on-demand only; the Workflow trigger runs it.
+
+  GlueETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: csv-transform-job-v2
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: pythonshell
+        PythonVersion: "3.9"
+        ScriptLocation: !Sub "s3://${ScriptsBucketName}/scripts/transform.py"
+      DefaultArguments:
+        "--INPUT_BUCKET": !Ref InputBucketName
+        "--OUTPUT_BUCKET": !Ref OutputBucketName
+      MaxCapacity: 0.0625
+      GlueVersion: "3.0"
+      Timeout: 30
+
+  # ---------------------------------------------------------------------
+  # Glue Workflow + Triggers (orchestration)
+  # ---------------------------------------------------------------------
+  GlueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: csv-ingestion-workflow-v2
+      Description: Orchestrates crawler -> ETL job for CSV ingestion.
+
+  StartWorkflowTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: start-workflow-trigger-v2
+      Type: ON_DEMAND
+      WorkflowName: !Ref GlueWorkflow
+      Actions:
+        - CrawlerName: !Ref GlueCrawler
+      StartOnCreation: false
+
+  CrawlerSuccessTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: crawler-success-trigger-v2
+      Type: CONDITIONAL
+      WorkflowName: !Ref GlueWorkflow
+      StartOnCreation: true
+      Predicate:
+        Logical: ANY
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueCrawler
+            CrawlState: SUCCEEDED
+      Actions:
+        - JobName: !Ref GlueETLJob
+
+  # ---------------------------------------------------------------------
+  # Lambda Function (S3 event -> start Glue Workflow)
+  # ---------------------------------------------------------------------
+  StartGlueWorkflowFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: start-glue-workflow-on-upload-v2
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaGlueTriggerRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          WORKFLOW_NAME: !Ref GlueWorkflow
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          glue = boto3.client("glue")
+          WORKFLOW_NAME = os.environ["WORKFLOW_NAME"]
+
+          def lambda_handler(event, context):
+              for record in event["Records"]:
+                  key = record["s3"]["object"]["key"]
+                  if key.lower().endswith(".csv"):
+                      response = glue.start_workflow_run(Name=WORKFLOW_NAME)
+                      print(f"Started workflow run {response['RunId']} for file {key}")
+              return {"statusCode": 200}
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartGlueWorkflowFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${InputBucketName}"
+      SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------
+  # S3 Event Notification (bucket -> Lambda)
+  # Uses a custom resource because AWS::S3::Bucket cannot have its
+  # NotificationConfiguration attached after creation without either a
+  # circular dependency or a second bucket-update step. This custom
+  # resource calls put_bucket_notification_configuration via a small
+  # inline Lambda, after both the bucket and the permission exist.
+  # ---------------------------------------------------------------------
+  BucketNotificationConfigFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: configure-input-bucket-notification-v2
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BucketNotificationConfigRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib.request
+
+          s3 = boto3.client("s3")
+
+          # Minimal inline replacement for the AWS-provided cfnresponse module
+          # (not bundled by default in the Python 3.12 runtime).
+          def send_response(event, context, status, data):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": f"See CloudWatch Log Stream: {context.log_stream_name}",
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  url=event["ResponseURL"],
+                  data=body,
+                  method="PUT",
+                  headers={"Content-Type": "", "Content-Length": str(len(body))},
+              )
+              urllib.request.urlopen(req)
+
+          def handler(event, context):
+              try:
+                  props = event["ResourceProperties"]
+                  bucket = props["BucketName"]
+                  if event["RequestType"] in ("Create", "Update"):
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket,
+                          NotificationConfiguration={
+                              "LambdaFunctionConfigurations": [
+                                  {
+                                      "LambdaFunctionArn": props["LambdaArn"],
+                                      "Events": ["s3:ObjectCreated:*"],
+                                      "Filter": {
+                                          "Key": {
+                                              "FilterRules": [
+                                                  {"Name": "prefix", "Value": "raw/"},
+                                                  {"Name": "suffix", "Value": ".csv"},
+                                              ]
+                                          }
+                                      },
+                                  }
+                              ]
+                          },
+                      )
+                  elif event["RequestType"] == "Delete":
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket, NotificationConfiguration={}
+                      )
+                  send_response(event, context, "SUCCESS", {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  send_response(event, context, "FAILED", {"Error": str(e)})
+
+  BucketNotificationConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: BucketNotificationConfigRole-CFN
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3NotificationConfigPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                Resource: !Sub "arn:aws:s3:::${InputBucketName}"
+
+  BucketNotificationConfig:
+    Type: Custom::S3BucketNotification
+    DependsOn:
+      - LambdaInvokePermission
+    Properties:
+      ServiceToken: !GetAtt BucketNotificationConfigFunction.Arn
+      BucketName: !Ref InputBucketName
+      LambdaArn: !GetAtt StartGlueWorkflowFunction.Arn
+
+  # ---------------------------------------------------------------------
+  # CloudWatch / EventBridge alarms (optional, only if email provided)
+  # ---------------------------------------------------------------------
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasNotificationEmail
+    Properties:
+      TopicName: pipeline-alerts-v2
+
+  AlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  GlueJobFailureRule:
+    Type: AWS::Events::Rule
+    Condition: HasNotificationEmail
+    Properties:
+      Name: glue-job-failure-v2
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Job State Change
+        detail:
+          jobName:
+            - !Ref GlueETLJob
+          state:
+            - FAILED
+      Targets:
+        - Arn: !Ref AlertsTopic
+          Id: AlertsTopicTarget
+
+  GlueCrawlerFailureRule:
+    Type: AWS::Events::Rule
+    Condition: HasNotificationEmail
+    Properties:
+      Name: glue-crawler-failure-v2
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Crawler State Change
+        detail:
+          crawlerName:
+            - !Ref GlueCrawler
+          state:
+            - Failed
+      Targets:
+        - Arn: !Ref AlertsTopic
+          Id: AlertsTopicTarget
+
+  SNSPublishPermissionForEventBridgeJob:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasNotificationEmail
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+
+Outputs:
+  InputBucketName:
+    Value: !Ref InputBucket
+  OutputBucketName:
+    Value: !Ref OutputBucket
+  ScriptsBucketName:
+    Value: !Ref ScriptsBucket
+  GlueWorkflowName:
+    Value: !Ref GlueWorkflow
+  LambdaFunctionName:
+    Value: !Ref StartGlueWorkflowFunction

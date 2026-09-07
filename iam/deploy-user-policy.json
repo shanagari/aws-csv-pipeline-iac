@@ -1,0 +1,131 @@
+{
+"Version": "2012-10-17",
+"Statement": [
+{
+"Sid": "CloudFormationFullOnThisStack",
+"Effect": "Allow",
+"Action": [
+"cloudformation:CreateStack",
+"cloudformation:UpdateStack",
+"cloudformation:DeleteStack",
+"cloudformation:DescribeStacks",
+"cloudformation:DescribeStackEvents",
+"cloudformation:DescribeStackResources",
+"cloudformation:GetTemplate",
+"cloudformation:ValidateTemplate",
+"cloudformation:ListStackResources"
+],
+"Resource": "arn:aws:cloudformation:*:*:stack/csv-pipeline-stack/*"
+},
+{
+"Sid": "S3BucketManagement",
+"Effect": "Allow",
+"Action": [
+"s3:CreateBucket",
+"s3:DeleteBucket",
+"s3:PutBucketPublicAccessBlock",
+"s3:PutBucketNotification",
+"s3:GetBucketNotification",
+"s3:GetObject",
+"s3:PutObject",
+"s3:DeleteObject",
+"s3:ListBucket"
+],
+"Resource": [
+"arn:aws:s3:::aws-bootcamp-*",
+"arn:aws:s3:::aws-bootcamp-*/*"
+]
+},
+{
+"Sid": "IAMRoleManagementForThisStack",
+"Effect": "Allow",
+"Action": [
+"iam:CreateRole",
+"iam:DeleteRole",
+"iam:GetRole",
+"iam:PassRole",
+"iam:AttachRolePolicy",
+"iam:DetachRolePolicy",
+"iam:PutRolePolicy",
+"iam:DeleteRolePolicy",
+"iam:GetRolePolicy",
+"iam:ListRolePolicies",
+"iam:ListAttachedRolePolicies",
+"iam:TagRole"
+],
+"Resource": [
+"arn:aws:iam::*:role/LambdaGlueTriggerRole-CFN",
+"arn:aws:iam::*:role/GlueETLRole-CFN",
+"arn:aws:iam::*:role/BucketNotificationConfigRole-CFN"
+]
+},
+{
+"Sid": "LambdaManagement",
+"Effect": "Allow",
+"Action": [
+"lambda:CreateFunction",
+"lambda:UpdateFunctionCode",
+"lambda:UpdateFunctionConfiguration",
+"lambda:DeleteFunction",
+"lambda:GetFunction",
+"lambda:AddPermission",
+"lambda:RemovePermission",
+"lambda:InvokeFunction",
+"lambda:TagResource",
+"lambda:ListTags"
+],
+"Resource": "arn:aws:lambda:*:*:function:*-v2"
+},
+{
+"Sid": "GlueManagement",
+"Effect": "Allow",
+"Action": [
+"glue:CreateDatabase",
+"glue:DeleteDatabase",
+"glue:GetDatabase",
+"glue:CreateCrawler",
+"glue:DeleteCrawler",
+"glue:GetCrawler",
+"glue:CreateJob",
+"glue:DeleteJob",
+"glue:GetJob",
+"glue:CreateWorkflow",
+"glue:DeleteWorkflow",
+"glue:GetWorkflow",
+"glue:CreateTrigger",
+"glue:DeleteTrigger",
+"glue:GetTrigger",
+"glue:TagResource"
+],
+"Resource": "*"
+},
+{
+"Sid": "EventsAndSNSForAlerts",
+"Effect": "Allow",
+"Action": [
+"events:PutRule",
+"events:DeleteRule",
+"events:DescribeRule",
+"events:PutTargets",
+"events:RemoveTargets",
+"sns:CreateTopic",
+"sns:DeleteTopic",
+"sns:Subscribe",
+"sns:Unsubscribe",
+"sns:GetTopicAttributes",
+"sns:SetTopicAttributes"
+],
+"Resource": "*"
+},
+{
+"Sid": "LogsForLambda",
+"Effect": "Allow",
+"Action": [
+"logs:CreateLogGroup",
+"logs:DeleteLogGroup",
+"logs:DescribeLogGroups"
+],
+"Resource": "*"
+}
+]
+}

@@ -266,11 +266,11 @@ Resources:
 
           # Minimal inline replacement for the AWS-provided cfnresponse module
           # (not bundled by default in the Python 3.12 runtime).
-          def send_response(event, context, status, data):
+          def send_response(event, context, status, data, physical_resource_id):
               body = json.dumps({
                   "Status": status,
                   "Reason": f"See CloudWatch Log Stream: {context.log_stream_name}",
-                  "PhysicalResourceId": context.log_stream_name,
+                  "PhysicalResourceId": physical_resource_id,
                   "StackId": event["StackId"],
                   "RequestId": event["RequestId"],
                   "LogicalResourceId": event["LogicalResourceId"],
@@ -285,9 +285,16 @@ Resources:
               urllib.request.urlopen(req)
 
           def handler(event, context):
+              props = event["ResourceProperties"]
+              bucket = props["BucketName"]
+              # IMPORTANT: PhysicalResourceId must stay stable across Create/Update
+              # calls for the same bucket. Using anything that changes per-invocation
+              # (like context.log_stream_name) makes CloudFormation treat every
+              # update as a replacement -- it creates a "new" resource (which sets
+              # the notification config), then deletes the "old" one (which wipes
+              # it again), racing on every deploy.
+              physical_resource_id = f"s3-notification-{bucket}"
               try:
-                  props = event["ResourceProperties"]
-                  bucket = props["BucketName"]
                   if event["RequestType"] in ("Create", "Update"):
                       s3.put_bucket_notification_configuration(
                           Bucket=bucket,
@@ -312,10 +319,10 @@ Resources:
                       s3.put_bucket_notification_configuration(
                           Bucket=bucket, NotificationConfiguration={}
                       )
-                  send_response(event, context, "SUCCESS", {})
+                  send_response(event, context, "SUCCESS", {}, physical_resource_id)
               except Exception as e:
                   print(f"Error: {e}")
-                  send_response(event, context, "FAILED", {"Error": str(e)})
+                  send_response(event, context, "FAILED", {"Error": str(e)}, physical_resource_id)
 
   BucketNotificationConfigRole:
     Type: AWS::IAM::Role

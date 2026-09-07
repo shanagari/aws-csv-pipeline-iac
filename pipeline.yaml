@@ -299,8 +299,8 @@ Resources:
                                       "Filter": {
                                           "Key": {
                                               "FilterRules": [
-                                                  {"Name": "prefix", "Value": "raw/ratings/"},
-                                                  {"Name": "suffix", "Value": ".csv"},
+                                                  {"Name": "prefix", "Value": props.get("FilterPrefix", "raw/")},
+                                                  {"Name": "suffix", "Value": props.get("FilterSuffix", ".csv")},
                                               ]
                                           }
                                       },
@@ -349,6 +349,8 @@ Resources:
       ServiceToken: !GetAtt BucketNotificationConfigFunction.Arn
       BucketName: !Ref InputBucketName
       LambdaArn: !GetAtt StartGlueWorkflowFunction.Arn
+      FilterPrefix: "raw/ratings/"
+      FilterSuffix: ".csv"
 
   # ---------------------------------------------------------------------
   # CloudWatch / EventBridge alarms (optional, only if email provided)

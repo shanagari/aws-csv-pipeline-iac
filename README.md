@@ -1,188 +1,260 @@
-# CSV Ingestion Pipeline — CloudFormation (IaC)
+# CSV Ingestion Pipeline — S3 → Lambda → Glue Workflow → S3
 
-This turns the manually-built pipeline into a single deployable/destroyable
-CloudFormation stack.
+This project was built in two phases:
 
-## What gets created
+1. **Manual build** — every resource created by hand in the AWS Console, to
+   understand how each piece works and connects.
+2. **Automated build** — the same architecture rebuilt as CloudFormation
+   (Infrastructure as Code) and deployed/destroyed via GitHub Actions CI/CD.
 
-- 3 S3 buckets: input, output, and a scripts bucket (holds the Glue job code)
-- 2 IAM roles: `LambdaGlueTriggerRole-CFN`, `GlueETLRole-CFN`
-- 1 Glue Database, 1 Crawler, 1 Python Shell ETL Job
-- 1 Glue Workflow with two triggers (on-demand → crawler, conditional →
-  job on crawler success) — identical logic to the manual setup
-- 1 Lambda function that starts the workflow when a `.csv` lands under
-  `raw/` in the input bucket
-- A small helper Lambda (backing a CloudFormation custom resource) that
-  wires the S3 → Lambda event notification, since that link can't be
-  expressed directly without a circular dependency in the template
-- Optional: an SNS topic + EventBridge rules for Glue job/crawler failure
-  alerts, only created if you pass a notification email
+## Architecture
 
-## Prerequisites
-
-- AWS CLI configured (or run from CloudShell, where it already is)
-- Permissions to create IAM roles, Lambda functions, Glue resources, S3
-  buckets, SNS topics, and EventBridge rules
-
-## Files
-
-- `pipeline.yaml` — the CloudFormation template
-- `scripts/transform.py` — the Glue Python Shell ETL script (uploaded to
-  the scripts bucket by `deploy.sh`, not embedded in the template)
-- `sample-data/movies/movies.csv`, `sample-data/ratings/ratings.csv` — test
-  data, one subfolder per dataset, mirroring the `raw/<dataset>/` layout in S3
-- `deploy.sh` — deploys the infra stack, then uploads the ETL script
-- `upload-data.sh` — uploads sample data to the already-deployed stack
-  (separate from infra deploy — run this any time to (re-)trigger the
-  pipeline)
-- `destroy.sh` — empties the buckets, then deletes the stack
-
-## Deploy
-
-```bash
-chmod +x deploy.sh destroy.sh upload-data.sh
-./deploy.sh you@example.com   # email is optional; omit to skip alerts
-./upload-data.sh              # loads sample data and triggers the pipeline
+```
+S3 (input bucket, .csv uploaded)
+   → S3 Event Notification (ObjectCreated, prefix/suffix filtered)
+   → Lambda function (starts Glue Workflow run)
+        → Glue Workflow
+             1. Crawler        → catalogs input CSV schema (Glue Data Catalog)
+             2. Glue ETL Job   → transforms data (Python Shell), writes to output S3
+   → CloudWatch Logs (Lambda, Crawler, Job)
 ```
 
-`deploy.sh` only provisions infrastructure — buckets, IAM roles, Lambda,
-Glue database/crawler/job/workflow. It does not touch data. `upload-data.sh`
-is the separate step that loads `sample-data/movies/movies.csv` and
-`sample-data/ratings/ratings.csv` into the input bucket, which is what actually
-fires the pipeline.
+Two datasets flow through this pipeline: `movies.csv` and `ratings.csv`. The ETL job joins them and computes an
+average rating per movie.
 
-**Note on the trigger**: the S3 event notification only fires on uploads to
-`raw/ratings/*.csv`, not on any `.csv` under `raw/`. This is deliberate —
-the ETL job reads both `movies.csv` and `ratings.csv`, so triggering on the
-`movies.csv` upload alone would start the workflow before `ratings.csv`
-exists, and the job would fail. Both `upload-data.sh` and the GitHub Action
-upload `movies.csv` first, then `ratings.csv`, so by the time the trigger
-fires, both files are already in place. If you add more datasets to this
-pipeline, either upload them before the "triggering" file, or add a proper
-manifest-file pattern instead of relying on upload order.
+![alt text](screenshots/architecture.png)
+![alt text](screenshots/cicd.png)
+---
 
-Check `s3://<output-bucket>/transformed/` for the result after the workflow
-run completes (takes a couple of minutes: crawler, then ETL job).
+# Part 1 — Manual Build
 
-If you provided a notification email, confirm the SNS subscription email
-that AWS sends you, or you won't receive failure alerts.
+Every resource below was created directly in the AWS Console, in this order.
 
-## Destroy
+## 1.1 S3 Buckets
 
-```bash
-./destroy.sh
+Created two buckets:
+- `aws-bootcamp-input` — source CSVs land here, under `raw/<dataset>/`
+- `aws-bootcamp-output` — transformed results land here, under `transformed/`
+
+**Validation**: both buckets visible in S3 console, default settings
+(Block Public Access enabled).
+
+![s3 buckets](screenshots/manual/01-s3-buckets.png.png)
+
+
+
+## 1.2 IAM Roles
+
+Two roles, created via **IAM → Roles → Create role**:
+
+| Role | Trusted service | Key permissions |
+|---|---|---|
+| `LambdaGlueTriggerRole` | Lambda | `glue:StartWorkflowRun`, `glue:GetWorkflowRun`, `s3:GetObject` on input bucket |
+| `Glue-role-af74499e` (Glue's auto-created role, reused) | Glue | `AWSGlueServiceRole` managed policy + inline S3 read/write on input + output buckets |
+
+**Validation**: both roles show correct trust relationships (`lambda.amazonaws.com`
+/ `glue.amazonaws.com`) and the expected inline/managed policies attached.
+
+![IAM roles](screenshots/manual/02-iam-roles.png)
+![Lambda role inline policy](screenshots/manual/03-lambda-inline-policy.png)
+![Glue role permissions](screenshots/manual/04-glue-role-permissions.png)
+
+## 1.3 Glue Data Catalog Database
+
+Created database `aws-bootcamp-db` under **Glue → Data Catalog → Databases**.
+
+## 1.4 Glue Crawler
+
+Created `bootcamp-crawler-data`, pointed at `s3://aws-bootcamp-input/raw/`,
+targeting `aws-bootcamp-db`, using the Glue IAM role above. Schedule set to
+**On demand** (the Workflow triggers it, not a cron schedule).
+
+**Validation**: ran the crawler manually once — it succeeded and created
+two separate tables, `movies` and `ratings`, correctly split because each
+dataset lives in its own subfolder (`raw/movies/`, `raw/ratings/`).
+
+![Crawler configuration](screenshots/manual/05-crawler-config.png)
+![Crawler run succeeded, tables created](screenshots/manual/06-crawler-success-tables.png)
+
+## 1.5 Glue ETL Job (Python Shell)
+
+Created `csv-transform-job` as a **Python Shell** job. The script:
+- Reads `movies.csv` and `ratings.csv` directly from S3 with pandas
+- Computes average rating + rating count per movie (`groupby` + `agg`)
+- Joins that back onto the movie metadata
+- Writes `movies_with_ratings.csv` to the output bucket
+
+**Validation**: ran the job manually — succeeded, and
+`movies_with_ratings.csv` appeared in the output bucket with correct
+`avg_rating`/`num_ratings` columns.
+
+![ETL job script](screenshots/manual/08-etl-job-success.png)
+
+
+## 1.6 Glue Workflow (orchestration)
+
+Created `csv-ingestion-workflow` to chain the crawler and job together:
+- **Trigger 1** (`start-workflow-trigger`): On-demand → runs `bootcamp-crawler-data`
+- **Trigger 2** (`crawler-success-trigger`): Conditional, fires when the
+  crawler reaches `SUCCEEDED` → runs `csv-transform-job`
+
+**Validation**: ran the whole workflow manually (not the individual
+pieces) — the graph showed crawler → job running in sequence, both
+succeeding, with fresh output in S3 afterward.
+
+![Workflow graph](screenshots/manual/10-workflow-graph.png)
+![Workflow run history, both succeeded](screenshots/manual/11-workflow-run-success.png)
+
+## 1.7 Lambda Function + S3 Trigger
+
+Created `start-glue-workflow-on-upload` (Python 3.12), using
+`LambdaGlueTriggerRole`. The function starts the Glue Workflow whenever an
+S3 event fires for a `.csv` file:
+
+```python
+import boto3
+
+glue = boto3.client("glue")
+WORKFLOW_NAME = "csv-ingestion-workflow"
+
+def lambda_handler(event, context):
+    for record in event["Records"]:
+        key = record["s3"]["object"]["key"]
+        if key.lower().endswith(".csv"):
+            response = glue.start_workflow_run(Name=WORKFLOW_NAME)
+            print(f"Started workflow run {response['RunId']} for file {key}")
+    return {"statusCode": 200}
 ```
 
-This empties all three S3 buckets (CloudFormation refuses to delete
-non-empty buckets) and then deletes the full stack — Lambda functions,
-IAM roles, Glue resources, SNS topic, EventBridge rules, all removed
-in one step.
+Added an **S3 trigger** on `aws-bootcamp-input`, scoped to prefix `raw/`,
+suffix `.csv`.
 
-## Deploying via GitHub Actions (CI/CD)
+![Lambda function code](screenshots/manual/12-lambda-code.png)
 
-Instead of running `deploy.sh` yourself, you can let GitHub Actions deploy
-the stack automatically on every push — using a dedicated IAM user scoped
-to just this pipeline, not your main account credentials.
 
-### 1. Create a dedicated IAM user
+## 1.8 End-to-End Manual Validation
 
-1. **IAM console → Users → Create user**.
-2. Name: `csv-pipeline-ci-deployer`.
-3. Do **not** attach any AWS managed policies yet — you'll attach a
-   scoped custom policy instead.
-4. After the user is created, open it → **Permissions → Add permissions
-   → Create inline policy → JSON tab** → paste the contents of
-   `iam/deploy-user-policy.json` (in this folder) → save.
-5. Go to **Security credentials** tab → **Create access key** → choose
-   **Third-party service** (or "Command Line Interface") as the use
-   case → **Create**.
-6. Copy the **Access key ID** and **Secret access key** immediately —
-   the secret is only shown once.
+Uploaded `movies.csv` then `ratings.csv` directly to
+`s3://aws-bootcamp-input/raw/...` (not through any manual "Run" button) and
+confirmed the entire chain fired automatically:
 
-This user can only manage the exact resources this stack creates
-(`aws-bootcamp-*` buckets, the `-CFN` IAM roles, `-v2` Lambda functions,
-and this specific CloudFormation stack) — it cannot touch your other
-AWS resources, including your original manually-built pipeline.
+1. **Lambda CloudWatch logs** — showed `Started workflow run <id> for file
+   raw/ratings/ratings.csv`.
+2. **Glue Workflow History** — a new run appeared automatically (not
+   manually triggered), crawler → job both succeeded.
+3. **S3 output bucket** — fresh `movies_with_ratings.csv`.
 
-### 2. Push this folder to a GitHub repo
+This confirmed the manually-built pipeline worked fully automatically:
+**S3 upload → Lambda → Glue Workflow → transformed output**, no manual
+intervention needed after the upload.
 
-```bash
-git init
-git add .
-git commit -m "CSV pipeline IaC"
-git branch -M main
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
-```
+![Lambda log showing auto-trigger](screenshots/manual/14-lambda-auto-trigger-log.png)
 
-### 3. Add GitHub Secrets
 
-In your repo: **Settings → Secrets and variables → Actions → New
-repository secret**. Add:
+---
 
-| Secret name             | Value                                  |
-|--------------------------|-----------------------------------------|
-| `AWS_ACCESS_KEY_ID`      | from step 1                            |
-| `AWS_SECRET_ACCESS_KEY`  | from step 1                            |
-| `AWS_REGION`             | e.g. `ap-southeast-2`                  |
+# Part 2 — Automated Build (Infrastructure as Code + CI/CD)
 
-Note: you do **not** need a separate "git token" for this — GitHub
-Actions automatically provides its own token for checking out your
-repo. The credentials above are purely for authenticating *to AWS*,
-which is the actual missing piece.
+The same architecture, rebuilt as code so it can be deployed, updated, and
+destroyed repeatably — with a completely separate, isolated set of
+resources (`-v2` suffix, separate IAM user) so it never touched the manual
+build above.
 
-### 4. Deploy the infrastructure
+## 2.1 CloudFormation Template
 
-- **Automatic**: push a change to `pipeline.yaml` or
-  `scripts/transform.py` on `main` — `.github/workflows/deploy.yml`
-  runs automatically.
-- **Manual**: go to **Actions tab → Deploy CSV Pipeline → Run workflow**,
-  optionally filling in a notification email.
+`pipeline.yaml` defines every resource from Part 1, plus:
+- A **custom resource** (a small helper Lambda) to wire the S3 → Lambda
+  event notification, since `AWS::S3::Bucket` can't reference a Lambda
+  ARN that depends on the bucket without a circular dependency.
 
-Check the **Actions** tab for logs — the final step prints the stack
-outputs (bucket names, workflow name) same as running `deploy.sh` locally.
 
-### 5. Upload sample data (separate workflow)
+**Parameters** let bucket/database/workflow names be overridden; defaults
+use a `-v2` suffix to avoid colliding with the manually-built resources.
 
-This is deliberately its own workflow, decoupled from infra deploy — so
-you can load/reload data without re-running CloudFormation, and infra
-changes don't accidentally re-trigger a data upload.
+![CloudFormation stack, all resources created](screenshots/automated/01-cfn-stack-resources.png)
 
-- **Automatic**: push a change to any CSV under `sample-data/<dataset>/` —
-  `.github/workflows/upload-data.yml` runs automatically, and uploads
-  **only the files that changed** in that push (diffed against the commit
-  before the push, so multi-commit pushes are handled correctly, not just
-  the single most recent commit).
-- **Manual**: **Actions tab → Upload Sample Data → Run workflow** — this
-  uploads everything under `sample-data/`, not just a diff.
+## 2.2 Dedicated IAM Deploy User
 
-Each file's destination is derived from its path: `sample-data/movies/movies.csv`
-uploads to `raw/movies/movies.csv` in the input bucket, `sample-data/ratings/ratings.csv`
-to `raw/ratings/ratings.csv`, and so on for any dataset folder you add — see
-the trigger note above for why the S3 event only fires on `ratings/*.csv`.
+Created `csv-pipeline-ci-deployer` — a **separate IAM user**, scoped to a
+custom policy (`iam/deploy-user-policy.json`) that only allows managing:
+- This specific CloudFormation stack (`csv-pipeline-stack`)
+- Buckets matching `aws-bootcamp-*`
+- The `-CFN`-suffixed IAM roles
+- Lambda functions/Glue resources matching this pipeline
+- The alerting SNS topic/EventBridge rules
 
-### 6. Destroy
+This user's access keys were added as **GitHub Secrets**
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`) — never
+committed to the repo.
 
-Go to **Actions tab → Destroy CSV Pipeline → Run workflow**, and type
-`destroy` into the confirmation input. This is a manual-only, confirmation-gated
-workflow — it will not run on push, and won't run without typing the exact
-word `destroy`, to prevent an accidental teardown.
+![IAM deploy user](screenshots/automated/02-iam-deploy-user.png)
+![Scoped policy attached](screenshots/automated/03-scoped-policy.png)
+![GitHub repo secrets configured](screenshots/automated/04-github-secrets.png)
 
-## Notes / things worth knowing
+## 2.3 Three GitHub Actions Workflows
 
-- **Bucket names must be globally unique.** The defaults in `pipeline.yaml`
-  (`aws-bootcamp-input-v2`, etc.) may already be taken by someone else on
-  AWS. If `deploy.sh` fails with a bucket-name-already-exists error, edit
-  the `Default` values in `pipeline.yaml` (or pass
-  `--parameter-overrides InputBucketName=... OutputBucketName=... ScriptsBucketName=...`
-  in `deploy.sh`) to something unique.
-- **This is separate from your manually-built resources** (`aws-bootcamp-input`,
-  `Glue-role-af74499e`, etc. without the `-v2` suffix) — nothing here touches
-  those. You can run both side by side, or manually delete the old console-built
-  resources once you've confirmed this stack works.
-- **Re-running `deploy.sh`** is safe — `aws cloudformation deploy` diffs
-  against the existing stack and only updates what changed.
-- **The Glue Job script isn't embedded in the template.** Glue Jobs require
-  `ScriptLocation` to point to an S3 object, so `deploy.sh` uploads
-  `scripts/transform.py` after the stack (and its scripts bucket) exists. If
-  you edit the script, just re-run `deploy.sh` — it re-uploads on every run.
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| **Deploy CSV Pipeline** | push to `pipeline.yaml`/`scripts/**`, or manual | Provisions/updates infrastructure only |
+| **Upload Sample Data** | push to `sample-data/**/*.csv`, or manual | Uploads only the changed CSV(s) to the matching `raw/<dataset>/` path — decoupled from infra changes |
+| **Destroy CSV Pipeline** | manual only, gated behind typing `destroy` | Empties buckets, deletes the entire stack |
+
+Data upload is deliberately **separate** from infra deploy: redeploying
+infrastructure shouldn't re-trigger a data load, and loading new data
+shouldn't require touching CloudFormation.
+
+![Deploy workflow run, succeeded](screenshots/automated/05-deploy-workflow-success.png)
+![Upload Sample Data workflow run](screenshots/automated/06-upload-workflow-success.png)
+
+#
+## 2.4 End-to-End Validation
+
+**Deploy → Upload → Trigger:**
+1. Ran **Deploy CSV Pipeline** — stack created successfully, outputs
+   printed (bucket names, workflow name).
+2. Confirmed **S3 → Properties → Event notifications** showed exactly 1
+   notification, correctly scoped to `raw/ratings/*.csv`.
+3. Ran **Upload Sample Data** — uploaded `movies.csv` then `ratings.csv`.
+4. Confirmed exactly **one** Lambda invocation (only `ratings.csv` fired
+   it), exactly **one** Glue Workflow run, and a fresh
+   `movies_with_ratings.csv` in the output bucket.
+
+![Deploy stack outputs](screenshots/automated/08-deploy-outputs.png)
+
+
+**Destroy → Redeploy (full lifecycle test):**
+1. Ran **Destroy CSV Pipeline** with confirmation — all three buckets
+   emptied, then the full stack deleted (`DELETE_COMPLETE`).
+2. Verified via `aws cloudformation list-stacks --stack-status-filter
+   DELETE_COMPLETE` and direct `head-bucket`/`get-function`/`get-role`
+   checks that every resource was actually gone, not just the
+   CloudFormation record.
+3. Ran **Deploy CSV Pipeline** again from the same, unmodified template —
+   the entire stack rebuilt cleanly from nothing.
+4. Re-ran **Upload Sample Data** and confirmed the pipeline worked
+   identically to the first deployment.
+
+This is the real proof point for Infrastructure as Code: the same
+template reliably produces the same working system, with no manual
+console steps required at any point in the cycle.
+
+![Destroy workflow succeeded](screenshots/automated/12-destroy-success.png))
+
+---
+
+# Summary
+
+| | Manual Build | Automated Build |
+|---|---|---|
+| **Creation method** | AWS Console, by hand | CloudFormation (`pipeline.yaml`) |
+| **Deployment** | One-off | Repeatable via `git push` / GitHub Actions |
+| **Data loading** | Manual S3 upload | GitHub Actions, diff-based, decoupled from infra |
+| **Teardown** | Manual deletion, resource by resource | One workflow, fully automated |
+| **Isolation** | `aws-bootcamp-*` resources | `aws-bootcamp-*-v2` resources, separate IAM user |
+| **Validated** | ✅ upload → auto-trigger → transformed output | ✅ deploy → upload → trigger → destroy → redeploy |
+
+Both pipelines demonstrate the same architecture:
+**S3 → Lambda → Glue Workflow (Crawler + ETL) → S3**, with CloudWatch
+logging throughout. The automated version adds full lifecycle
+repeatability and removes any manual AWS Console steps from normal
+day-to-day operation.

@@ -2,7 +2,7 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "CloudFormationFullOnThisStack",
+      "Sid": "CloudFormationOnThisStackOnly",
       "Effect": "Allow",
       "Action": [
         "cloudformation:CreateStack",
@@ -12,13 +12,18 @@
         "cloudformation:DescribeStackEvents",
         "cloudformation:DescribeStackResources",
         "cloudformation:GetTemplate",
+        "cloudformation:GetTemplateSummary",
         "cloudformation:ValidateTemplate",
-        "cloudformation:ListStackResources"
+        "cloudformation:ListStackResources",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet"
       ],
       "Resource": "arn:aws:cloudformation:*:*:stack/csv-pipeline-stack/*"
     },
     {
-      "Sid": "S3BucketManagement",
+      "Sid": "S3ExactBucketsOnly",
       "Effect": "Allow",
       "Action": [
         "s3:CreateBucket",
@@ -32,12 +37,16 @@
         "s3:ListBucket"
       ],
       "Resource": [
-        "arn:aws:s3:::aws-bootcamp-*",
-        "arn:aws:s3:::aws-bootcamp-*/*"
+        "arn:aws:s3:::aws-bootcamp-input-v2",
+        "arn:aws:s3:::aws-bootcamp-input-v2/*",
+        "arn:aws:s3:::aws-bootcamp-output-v2",
+        "arn:aws:s3:::aws-bootcamp-output-v2/*",
+        "arn:aws:s3:::aws-bootcamp-scripts-v2",
+        "arn:aws:s3:::aws-bootcamp-scripts-v2/*"
       ]
     },
     {
-      "Sid": "IAMRoleManagementForThisStack",
+      "Sid": "IAMExactRolesOnly",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
@@ -60,7 +69,7 @@
       ]
     },
     {
-      "Sid": "LambdaManagement",
+      "Sid": "LambdaExactFunctionsOnly",
       "Effect": "Allow",
       "Action": [
         "lambda:CreateFunction",
@@ -74,45 +83,95 @@
         "lambda:TagResource",
         "lambda:ListTags"
       ],
-      "Resource": "arn:aws:lambda:*:*:function:*-v2"
+      "Resource": [
+        "arn:aws:lambda:*:*:function:start-glue-workflow-on-upload-v2",
+        "arn:aws:lambda:*:*:function:configure-input-bucket-notification-v2"
+      ]
     },
     {
-      "Sid": "GlueManagement",
+      "Sid": "GlueCatalogAndDatabase",
       "Effect": "Allow",
       "Action": [
         "glue:CreateDatabase",
         "glue:DeleteDatabase",
-        "glue:GetDatabase",
+        "glue:GetDatabase"
+      ],
+      "Resource": [
+        "arn:aws:glue:*:*:catalog",
+        "arn:aws:glue:*:*:database/aws_bootcamp_db_v2"
+      ]
+    },
+    {
+      "Sid": "GlueCrawlerExact",
+      "Effect": "Allow",
+      "Action": [
         "glue:CreateCrawler",
         "glue:DeleteCrawler",
         "glue:GetCrawler",
         "glue:StopCrawler",
+        "glue:TagResource"
+      ],
+      "Resource": "arn:aws:glue:*:*:crawler/bootcamp-crawler-data-v2"
+    },
+    {
+      "Sid": "GlueJobExact",
+      "Effect": "Allow",
+      "Action": [
         "glue:CreateJob",
         "glue:DeleteJob",
         "glue:GetJob",
         "glue:BatchStopJobRun",
         "glue:GetJobRuns",
+        "glue:TagResource"
+      ],
+      "Resource": "arn:aws:glue:*:*:job/csv-transform-job-v2"
+    },
+    {
+      "Sid": "GlueWorkflowExact",
+      "Effect": "Allow",
+      "Action": [
         "glue:CreateWorkflow",
         "glue:DeleteWorkflow",
         "glue:GetWorkflow",
         "glue:StopWorkflowRun",
         "glue:GetWorkflowRuns",
+        "glue:TagResource"
+      ],
+      "Resource": "arn:aws:glue:*:*:workflow/csv-ingestion-workflow-v2"
+    },
+    {
+      "Sid": "GlueTriggersExact",
+      "Effect": "Allow",
+      "Action": [
         "glue:CreateTrigger",
         "glue:DeleteTrigger",
         "glue:GetTrigger",
         "glue:TagResource"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:glue:*:*:trigger/start-workflow-trigger-v2",
+        "arn:aws:glue:*:*:trigger/crawler-success-trigger-v2"
+      ]
     },
     {
-      "Sid": "EventsAndSNSForAlerts",
+      "Sid": "EventsAndSNSExact",
       "Effect": "Allow",
       "Action": [
         "events:PutRule",
         "events:DeleteRule",
         "events:DescribeRule",
         "events:PutTargets",
-        "events:RemoveTargets",
+        "events:RemoveTargets"
+      ],
+      "Resource": [
+        "arn:aws:events:*:*:rule/glue-job-failure-v2",
+        "arn:aws:events:*:*:rule/glue-crawler-failure-v2"
+      ]
+    },
+    {
+      "Sid": "SNSExact",
+      "Effect": "Allow",
+      "Action": [
         "sns:CreateTopic",
         "sns:DeleteTopic",
         "sns:Subscribe",
@@ -120,7 +179,7 @@
         "sns:GetTopicAttributes",
         "sns:SetTopicAttributes"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:sns:*:*:pipeline-alerts-v2"
     },
     {
       "Sid": "LogsForLambda",
@@ -130,7 +189,10 @@
         "logs:DeleteLogGroup",
         "logs:DescribeLogGroups"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/aws/lambda/start-glue-workflow-on-upload-v2:*",
+        "arn:aws:logs:*:*:log-group:/aws/lambda/configure-input-bucket-notification-v2:*"
+      ]
     }
   ]
 }

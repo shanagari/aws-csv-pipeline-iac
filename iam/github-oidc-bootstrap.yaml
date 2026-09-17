@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  One-time bootstrap: GitHub OIDC identity provider + IAM role for CI/CD.
+  Deploy this ONCE, manually (with your own admin/IAM-user credentials),
+  before the GitHub Actions workflows can use OIDC. You cannot deploy this
+  template using the role it creates -- that would be circular.
+
+Parameters:
+  GitHubOrgAndRepo:
+    Type: String
+    Default: "shanagari/aws-csv-pipeline-iac"
+    Description: "GitHub 'org/repo' allowed to assume this role."
+  GitHubBranch:
+    Type: String
+    Default: "main"
+    Description: "Branch this role trusts. Restricts which branch's workflow runs can assume it."
+
+Resources:
+  # ---------------------------------------------------------------------
+  # GitHub's OIDC provider. One per AWS account, regardless of how many
+  # repos/roles use it -- if you already created this for another
+  # project, remove this resource and reference the existing provider's
+  # ARN in GitHubActionsDeployRole's trust policy instead.
+  # ---------------------------------------------------------------------
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # GitHub's OIDC signing certificate thumbprints. AWS now validates
+      # the certificate chain itself rather than relying solely on this
+      # list, but the field is still required at creation time. Both of
+      # GitHub's known intermediate CA thumbprints are listed for safety
+      # across their certificate rotations.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # ---------------------------------------------------------------------
+  # The role GitHub Actions assumes. Trust policy restricts this to:
+  # - only this AWS account's OIDC provider (Federated principal)
+  # - only tokens issued for sts.amazonaws.com (aud claim)
+  # - only workflow runs from this exact repo + branch (sub claim)
+  # No long-lived credentials are stored anywhere -- GitHub requests a
+  # short-lived token for each workflow run, which STS exchanges for
+  # short-lived AWS credentials scoped to this role's permissions.
+  # ---------------------------------------------------------------------
+  GitHubActionsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GitHubActionsCICDRole
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+              StringLike:
+                "token.actions.githubusercontent.com:sub": !Sub "repo:${GitHubOrgAndRepo}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: PipelineDeployPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudFormationOnThisStackOnly
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:ListStackResources
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource: "arn:aws:cloudformation:*:*:stack/csv-pipeline-stack/*"
+              - Sid: S3ExactBucketsOnly
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - "arn:aws:s3:::aws-bootcamp-input-v2"
+                  - "arn:aws:s3:::aws-bootcamp-input-v2/*"
+                  - "arn:aws:s3:::aws-bootcamp-output-v2"
+                  - "arn:aws:s3:::aws-bootcamp-output-v2/*"
+                  - "arn:aws:s3:::aws-bootcamp-scripts-v2"
+                  - "arn:aws:s3:::aws-bootcamp-scripts-v2/*"
+              - Sid: IAMExactRolesOnly
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                Resource:
+                  - "arn:aws:iam::*:role/LambdaGlueTriggerRole-CFN"
+                  - "arn:aws:iam::*:role/GlueETLRole-CFN"
+                  - "arn:aws:iam::*:role/BucketNotificationConfigRole-CFN"
+              - Sid: LambdaExactFunctionsOnly
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:InvokeFunction
+                  - lambda:TagResource
+                  - lambda:ListTags
+                Resource:
+                  - "arn:aws:lambda:*:*:function:start-glue-workflow-on-upload-v2"
+                  - "arn:aws:lambda:*:*:function:configure-input-bucket-notification-v2"
+              - Sid: GlueCatalogAndDatabase
+                Effect: Allow
+                Action:
+                  - glue:CreateDatabase
+                  - glue:DeleteDatabase
+                  - glue:GetDatabase
+                Resource:
+                  - "arn:aws:glue:*:*:catalog"
+                  - "arn:aws:glue:*:*:database/aws_bootcamp_db_v2"
+              - Sid: GlueCrawlerExact
+                Effect: Allow
+                Action:
+                  - glue:CreateCrawler
+                  - glue:DeleteCrawler
+                  - glue:GetCrawler
+                  - glue:StopCrawler
+                  - glue:TagResource
+                Resource: "arn:aws:glue:*:*:crawler/bootcamp-crawler-data-v2"
+              - Sid: GlueJobExact
+                Effect: Allow
+                Action:
+                  - glue:CreateJob
+                  - glue:DeleteJob
+                  - glue:GetJob
+                  - glue:BatchStopJobRun
+                  - glue:GetJobRuns
+                  - glue:TagResource
+                Resource: "arn:aws:glue:*:*:job/csv-transform-job-v2"
+              - Sid: GlueWorkflowExact
+                Effect: Allow
+                Action:
+                  - glue:CreateWorkflow
+                  - glue:DeleteWorkflow
+                  - glue:GetWorkflow
+                  - glue:StopWorkflowRun
+                  - glue:GetWorkflowRuns
+                  - glue:TagResource
+                Resource: "arn:aws:glue:*:*:workflow/csv-ingestion-workflow-v2"
+              - Sid: GlueTriggersExact
+                Effect: Allow
+                Action:
+                  - glue:CreateTrigger
+                  - glue:DeleteTrigger
+                  - glue:GetTrigger
+                  - glue:TagResource
+                Resource:
+                  - "arn:aws:glue:*:*:trigger/start-workflow-trigger-v2"
+                  - "arn:aws:glue:*:*:trigger/crawler-success-trigger-v2"
+              - Sid: EventsAndSNSExact
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                Resource:
+                  - "arn:aws:events:*:*:rule/glue-job-failure-v2"
+                  - "arn:aws:events:*:*:rule/glue-crawler-failure-v2"
+              - Sid: SNSExact
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                Resource: "arn:aws:sns:*:*:pipeline-alerts-v2"
+              - Sid: LogsForLambda
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                Resource:
+                  - "arn:aws:logs:*:*:log-group:/aws/lambda/start-glue-workflow-on-upload-v2:*"
+                  - "arn:aws:logs:*:*:log-group:/aws/lambda/configure-input-bucket-notification-v2:*"
+
+Outputs:
+  RoleArn:
+    Description: Put this ARN into the GitHub Actions workflow files (role-to-assume).
+    Value: !GetAtt GitHubActionsDeployRole.Arn
+  OIDCProviderArn:
+    Value: !Ref GitHubOIDCProvider

@@ -11,8 +11,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write   # required to request the OIDC token
-  contents: read    # only needs to check out the repo
+  contents: read   # only needs to check out the repo
 
 jobs:
   upload:
@@ -23,10 +22,11 @@ jobs:
         with:
           fetch-depth: 0   # full history, so the before/after diff below always works
 
-      - name: Configure AWS credentials (OIDC — no stored keys)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Look up input bucket from the deployed stack
